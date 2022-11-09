@@ -1,0 +1,1633 @@
+---
+title: "Disease_prediction"
+author: "María Bueno Álvez"
+date: "08/11/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+Analysis date: `r Sys.Date()`
+
+# Set up
+
+## Load libraries
+
+```{r}
+
+library(tidyverse)
+library(ggbeeswarm)
+library(ggrepel)
+library(caret)
+library(pROC)
+library(patchwork)
+library(gridExtra)
+library(multiROC)
+library(pheatmap)
+library(ggplotify)
+library(tidygraph)
+library(ggraph)
+library(impute)
+library(limma)
+library(writexl)
+
+select <- dplyr::select
+summarise <- dplyr::summarise
+rename <- dplyr::rename
+
+source("scripts/functions_utility.R")
+source("scripts/functions_classifiers.R")
+
+```
+
+## Load data
+
+```{r}
+
+# Cancer data (synthetic)
+data <-
+  readRDS("data/cancer_data_synthetic.rds")
+metadata <-
+  readRDS("data/cancer_metadata_synthetic.rds")
+
+# Healthy data (synthetic)
+wellness_data <-
+  readRDS("data/wellness_data_synthetic.rds")
+wellness_meta <-
+  readRDS("data/wellness_metadata_synthetic.rds")
+
+# Themes & palettes
+palettes <- 
+  readRDS("data/processed/others/palettes.rds")
+themes <- 
+  readRDS("data/processed/others/plot_themes.rds")
+levels <- 
+  readRDS("data/processed/others/levels.rds")
+
+```
+
+# Split train - test
+
+```{r}
+
+cancer_data <-
+  data %>% 
+  select(Sample) %>% 
+  distinct() %>% 
+  left_join(metadata, by = "Sample") %>% 
+  filter(GROUP %in% levels$cancers_12) %>% 
+  select(Sample,GROUP)
+
+cancers_split <-
+  cancer_data %>% 
+  group_by(GROUP) %>% 
+  do({
+    
+    dat <- .
+    
+    set.seed(213)
+    train <- createDataPartition(dat$GROUP,p=0.7,list=FALSE)
+    train_data <- 
+      dat[train,] %>% 
+      mutate(set = "train")
+    test_data <- dat[-train,] %>% 
+      mutate(set = "test")
+    train_data %>% 
+      bind_rows(test_data)
+  })
+ 
+saveRDS(cancers_split, savepath_data("Data_split", "cancers_split.rds"))
+
+```
+
+
+# Disease classifier for the 12 cancers
+
+## glmnet algorithm
+
+```{r}
+
+# Iterate over the 12 cancers to 1) generate a balanced set of controls (with similar number of patients as the cancer group) and 2) Build a disease classifier 
+glmnet_res <- 
+  lapply(levels$cancers_12, function(cancer) {
+    
+    cancer_data_split <- 
+      generate_balanced_controls(cancer = cancer,
+                                 metadata = metadata, 
+                                 set_data = cancers_split,
+                                 n_control_groups = length(levels$cancers_12)-1)
+  
+    disease_classifier(cancer_type = cancer,
+                       method = "glmnet", 
+                       data = data,
+                       split_data = cancer_data_split,
+                       metadata = metadata, 
+                       select_proteins = NULL, 
+                       tune_param = 10, 
+                       CV = 5)
+  }) %>% 
+  set_names(levels$cancers_12)
+
+saveRDS(glmnet_res, savepath_data("Models", "glmnet_res.rds"))
+
+```
+
+
+### Heatmap - proteins with > 25% importance in one cancer
+
+```{r}
+
+# Extract importance scores for each protein across all cancers
+all_prot <- 
+  lapply(c(1:length(levels$cancers_12)), function(i){
+    model <- glmnet_res[[i]]
+    name <- levels$cancers_12[[i]]
+    
+    model$prot_res %>% 
+      mutate(GROUP = name)
+  })
+
+# Number of proteins with >25% importance per cancer
+n_prots <- 
+  all_prot %>% 
+  bind_rows() %>% 
+  rename(Cancer = GROUP) %>% 
+  filter(Overall > 25) %>% 
+  group_by(Cancer) %>% 
+  summarise(n = n_distinct(Protein)) %>% 
+  arrange(-n) 
+
+n_prots %>% 
+  mutate(Cancer = factor(Cancer, levels = n_prots$Cancer)) %>% 
+  ggplot(aes(Cancer,n,fill=Cancer)) +
+  geom_bar(stat="identity", show.legend = F) +
+  geom_text(aes(label=n, y = n+15, color = Cancer), size = 3.5,  show.legend = F, color = "black") +
+  themes$simple +
+  scale_fill_manual(values = palettes$alt_group[levels$cancers_12]) +
+  scale_color_manual(values = palettes$alt_group[levels$cancers_12]) 
+
+ggsave(savepath("barplot_num_proteins_25_importance.pdf"),
+       height = 2,
+       width = 4)
+
+# Importance across all cancers for proteins with >25% importance in at least one cancer 
+prots <- 
+  all_prot %>% 
+  bind_rows() %>% 
+  rename(Cancer = GROUP) %>% 
+  filter(Overall > 25) %>% 
+  pull(Protein) %>% 
+  unique()
+
+order <-
+  tibble(GROUP = n_prots$Cancer) %>% 
+  left_join(levels$cancers_12_mapping, by = "GROUP") %>% 
+  pull(Cancer)
+
+ann <- 
+  palettes$alt_group_complete %>% 
+  enframe() %>% 
+  mutate(value = name) %>% 
+  rename(Cancer = value) %>% 
+  column_to_rownames("name")
+
+all_prot %>% 
+  bind_rows() %>% 
+  left_join(levels$cancers_12_mapping, by = "GROUP") %>% 
+  mutate(Cancer = factor(Cancer, levels = order)) %>% 
+  filter(Protein %in% prots) %>% 
+  select(-GROUP) %>% 
+  spread(Cancer,Overall) %>% 
+  column_to_rownames("Protein") %>% 
+  pheatmap(color = colorRampPalette(c("grey95", "grey15"))(100),
+           show_rownames = F, 
+           cluster_cols = F,
+           annotation_col = ann,
+           annotation_colors = list("Cancer" = palettes$alt_group_complete)) %>% 
+  as.ggplot() 
+
+ggsave(savepath("glmnet_protein_importance_25.pdf"),
+       height = 6,
+       width = 4)
+
+```
+
+### Network - proteins with > 25% importance in one cancer
+
+```{r}
+
+# Prepare input data
+network_model_data <-
+  all_prot %>% 
+  bind_rows() %>% 
+  rename(Cancer = GROUP) %>% 
+  filter(Overall > 25) %>% 
+  select(Protein,Cancer,Overall)
+
+node_pal <-
+  c(unique(network_model_data$Protein),unique(network_model_data$Cancer)) %>%
+  enframe() %>%
+  mutate(name = value,
+         value = case_when(name %in% levels$cancers_12 ~ palettes$alt_group[name],
+                           T ~ "grey70")) %>%
+  deframe()
+
+# Generate network
+set.seed(213)
+network_model_data %>% 
+  as_tbl_graph() %>% 
+  activate(nodes) %>% 
+  mutate(s = case_when(name %in% levels$cancers_12 ~ 5,
+                       T ~ 0.5),
+         text_color = case_when(name %in% levels$cancers_12 ~ "white",
+                                T ~ "black")) %>%
+  create_layout(layout = "nicely") %>% 
+  ggraph() + 
+  geom_edge_link(aes(), color = "grey90") + # Indicate width  = Overall for link proportional to importance score
+ # scale_edge_width(range = c(0.1, 2)) +
+  geom_node_point(aes(color = name, 
+                      size = s),
+                  show.legend = F)+
+  geom_node_point(data = . %>% 
+                    filter(name %in% levels$cancers_12) ,
+                  aes(color = name,
+                      size = s),
+                  fill ="grey30",
+                  shape = 21,
+                  stroke = 3,
+                  show.legend = F) +
+  scale_color_manual(values = node_pal) +
+  geom_node_text(data = . %>% 
+                   filter(name %in% levels$cancers_12) ,
+                 aes(label = str_wrap(name, width = 10)),
+                 color = "white",
+                 lineheight = 0.8,
+                 size = 1.5,
+                 vjust = 0,
+                 hjust = 0.5) +
+  theme_void() + 
+  coord_fixed() +
+  ggtitle("Overall > 25")
+  
+ggsave(savepath("network_proteins_25_importance.pdf"))
+
+```
+
+## Random forest (RF) algorithm
+
+```{r}
+
+# Iterate over the 12 cancers to 1) generate a balanced set of controls (with similar number of patients as the cancer group) and 2) Build a disease classifier 
+rf_res <- 
+  lapply(levels$cancers_12, function(cancer) {
+    
+    cancer_data_split <- 
+      generate_balanced_controls(cancer = cancer,
+                                 metadata = metadata,
+                                 set_data = cancers_split,
+                                 n_control_groups = length(levels$cancers_12)-1)
+    
+    disease_classifier(cancer_type = cancer,
+                       method = "rf", 
+                       data = data,
+                       split_data = cancer_data_split,
+                       metadata = metadata, 
+                       select_proteins = NULL, 
+                       tune_param = 10, 
+                       CV = 5)
+  }) %>% 
+  set_names(levels$cancers_12)
+
+saveRDS(rf_res, savepath_data("Models", "rf_res.rds"))
+
+```
+
+# Compare glmnet & RF results
+
+## De-long test
+
+```{r}
+
+# Calculate whether the differences in AUC for the glmnet and RF models is significant using the De-long test 
+delong_rf_glmnet <- 
+  data.frame(cancer = levels$cancers_12) %>% 
+  group_by(cancer) %>% 
+  do({
+    
+    c <- .$cancer
+    res <- 
+      pROC::roc.test(glmnet_res[[c]]$roc_res,
+                     rf_res[[c]]$roc_res, 
+                     method = "delong", 
+                     boot.n=10000)
+    
+    data.frame(AUC_glmnet = as.numeric(res$roc1$auc),
+               AUC_rf = as.numeric(res$roc2$auc),
+               pvalue = res$p.value,
+               method = res$method)
+  })
+
+write_csv(delong_rf_glmnet, savepath_data("delong_test", "delong_rf_glmnet.csv"))
+
+```
+
+## Visualize ROC curves for glmnet & RF
+
+```{r}
+
+# Summarize ROC curves for all cancers using RF and glmnet, indicating the p-values obtained using the De-long test
+all_roc <- 
+  lapply(levels$cancers_12, function(cancer_type) {
+    
+    roc <- glmnet_res[[cancer_type]]$roc_res 
+    
+     df<-data.frame(Sensitivity=unlist(roc[2]), 
+                    Specificity=unlist(roc[3])) %>% 
+    mutate(Group = cancer_type,
+           Method = "glmnet",
+           AUC = as.numeric(unlist(roc[9])))
+     
+  }) %>% 
+  bind_rows() %>% 
+  bind_rows(lapply(levels$cancers_12, function(cancer_type) {
+    
+    roc <- rf_res[[cancer_type]]$roc_res 
+    
+    df<-data.frame(Sensitivity=unlist(roc[2]), 
+                    Specificity=unlist(roc[3])) %>% 
+    mutate(Group = cancer_type,
+           Method = "rf",
+           AUC = as.numeric(unlist(roc[9])))
+     
+  }) %>% 
+  bind_rows()) %>% 
+  mutate(Performance = paste(Group, " - ", Method, ": ", round(AUC,2),sep=""))
+
+
+aucs <- 
+  all_roc %>% 
+  select(GROUP = Group, AUC, Method) %>% 
+  left_join(levels$cancers_12_mapping, by = "GROUP") %>% 
+  mutate(AUC = round(AUC,2)) %>% 
+  distinct() %>% 
+  mutate(x = 0.95,
+         y = case_when(Method == "glmnet" ~ 0.35,
+                       Method == "rf" ~ 0.25,
+                       T ~ 0.05))
+
+all_roc %>% 
+  rename(GROUP = Group) %>% 
+  left_join(levels$cancers_12_mapping, by = "GROUP") %>% 
+  mutate(Cancer = factor(Cancer, levels = levels$cancers_12_mapping$Cancer)) %>%
+  arrange(Cancer,Method) %>% 
+  ggplot(aes(x = 1-Specificity, y=Sensitivity, group = Method)) +
+  geom_path(aes(color = Method), size=1) +
+  geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1), 
+               colour='grey', linetype = 'dotdash') +
+  geom_text(data = aucs, aes(x,y,color=Method, label = paste("AUC: ", round(AUC,3), sep = "")),
+            hjust = 1,
+            size = 3, show.legend = F) +
+  geom_text(data = delong_rf_glmnet %>% 
+              rename(GROUP = cancer)%>% 
+              left_join(levels$cancers_12_mapping, by = "GROUP") , 
+            aes(x = 0.7, y = 0.1, label = paste("p-value: ", round(pvalue,2), sep = "")), 
+            color = "black", size = 3, inherit.aes = F) +
+  themes$main + 
+  scale_color_manual(values = c("glmnet" = "#6F70C9", "rf" = "#8ED2C9")) +
+  facet_wrap(~as.factor(Cancer)) +
+  theme(axis.text = element_text(size = 8),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top")
+
+ggsave(savepath("aucs_rf_glmnet_delong.pdf"),
+       height = 7,
+       width = 7)
+
+```
+
+## Compare protein importance
+
+```{r}
+
+# Extract protein importance scores from glmnet and random forest models
+prot_import <- 
+  lapply(c(1:length(levels$cancers_12)), function(i){
+    model <- glmnet_res[[i]]
+    name <- levels$cancers_12[[i]]
+    
+    model$prot_res %>% 
+      mutate(GROUP = name)
+  }) %>% 
+  bind_rows() %>% 
+  mutate(Model = "glmnet") %>% 
+  bind_rows(lapply(c(1:length(levels$cancers_12)), function(i){
+    model <- rf_res[[i]]
+    name <- levels$cancers_12[[i]]
+    
+    model$prot_res %>% 
+      mutate(GROUP = name)
+  }) %>% 
+  bind_rows() %>% 
+  mutate(Model = "rf"))
+
+
+# Scatterplot - model importance
+prot_import %>% 
+  left_join(levels$cancers_12_mapping) %>% 
+  mutate(Cancer = factor(Cancer, levels = levels$cancers_12_mapping$Cancer)) %>%
+  spread(Model, Overall, -1, -3) %>% 
+  mutate(avg = (glmnet + rf) / 2) %>% 
+  ggplot(aes(glmnet, rf, color = GROUP)) +
+  geom_point(alpha = 0.5, show.legend = F) +
+  geom_text_repel(data = . %>% 
+               group_by(GROUP) %>% 
+               top_n(5, avg), 
+             aes(label = Protein),
+             size = 3,
+             color = "black") +
+  scale_color_manual(values = palettes$alt_group) +
+  facet_wrap(~Cancer, ncol = 4) + #4
+  themes$main +
+  ylab("random forest") 
+
+ggsave(savepath("protein_importance_rf_glmnet.pdf"),
+                height = 6,
+                width = 10)
+
+```
+
+## Compare model probabilities
+
+```{r}
+
+# Extract model prediction probabilities from glmnet and random forest models
+sample_prob <- 
+  lapply(c(1:length(levels$cancers_12)), function(i){
+    model <- glmnet_res[[i]]
+    name <- levels$cancers_12[[i]]
+    
+    model$probabilities_test %>% 
+      mutate(GROUP = name)
+  }) %>% 
+  bind_rows() %>% 
+  mutate(Model = "glmnet") %>% 
+  bind_rows(lapply(c(1:length(levels$cancers_12)), function(i){
+    model <- rf_res[[i]]
+    name <- levels$cancers_12[[i]]
+    
+    model$probabilities_test %>% 
+      mutate(GROUP = name)
+  }) %>% 
+  bind_rows() %>% 
+  mutate(Model = "rf"))
+
+
+# Scatterplot - prediction probabilities
+sample_prob %>% 
+  ungroup() %>% 
+  mutate(GROUP = factor(GROUP, levels = levels$cancers_12)) %>% 
+  left_join(levels$cancers_12_mapping) %>% 
+  mutate(Cancer = factor(Cancer, levels = levels$cancers_12_mapping$Cancer)) %>%
+  select(-Probability_control) %>% 
+  spread(Model, Probability_cancer, -1,-2,-4) %>% 
+  ggplot(aes(glmnet, rf, color = True_class)) +
+  geom_point(alpha = 0.5) +
+  facet_wrap(~Cancer, ncol = 4) + 
+  themes$main +
+  ylab("random forest") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0))+
+  theme(legend.position = "top")
+
+ggsave(savepath("probabilities_rf_glmnet.pdf"),
+                height = 6,
+                width = 10)
+```
+
+## Save Supplementary file 2
+
+```{r}
+
+model_results <- 
+  prot_import %>% 
+  mutate(Overall = round(Overall,1)) %>% 
+  spread(Model, Overall) %>% 
+  left_join(levels$cancers_12_mapping,
+            by = "GROUP") %>% 
+  mutate(Cancer = factor(Cancer, levels = levels$cancers_12_mapping$Cancer)) %>% 
+  mutate(Protein = gsub("`","",Protein))%>% 
+  arrange(Cancer) %>% 
+  left_join(data %>% 
+              select(Protein = Assay,OlinkID, UniProt,Panel) %>% 
+              distinct(),
+            by = "Protein") %>% 
+  select(Cancer,Protein, OlinkID, UniProt, Panel, Overall_importance_rf = rf, Overall_importance_glmnet = glmnet) 
+
+writexl::write_xlsx(model_results, savepath_data("Supplementary_data", "DataS2_prediction_models.xlsx"))
+
+```
+
+
+# Differential expression
+
+```{r}
+
+# Load results from differential expression analysis (Differential_expression.rmd)
+de_all <- 
+  readRDS(savepath_data("DE","cancers_sex_controlled_not_adjusted.rds")) 
+
+# Multiple hypothesis testing correction
+de_adj <- 
+  de_all %>% 
+  group_by(Class) %>% 
+  do({
+    dat <- .
+    
+    dat %>% 
+      DE_adjust()
+  })
+
+# Select upregulated proteins
+de_up <- 
+  de_adj %>% 
+  filter(sig == "significant up")
+
+```
+
+
+# Protein panel
+
+## Select protein panel
+
+```{r}
+
+# Top 3 upregulated proteins per cancer
+prot_panel_top3 <- 
+  all_prot %>% 
+  bind_rows() %>% 
+  inner_join(de_up %>% 
+               select(Protein = Assay,GROUP = Class),
+             by = c("Protein", "GROUP")) %>% 
+  rename(Cancer = GROUP) %>%
+  group_by(Cancer) %>% 
+  filter(Overall > 0) %>% 
+  top_n(3, wt = Overall)
+
+# Upregulated proteins with more than 50% importance
+prot_panel_50 <- 
+  all_prot %>% 
+  bind_rows() %>% 
+  inner_join(de_up %>% 
+               select(Protein = Assay,GROUP = Class),
+             by = c("Protein", "GROUP")) %>% 
+  rename(Cancer = GROUP) %>% 
+  filter(Overall > 50) 
+
+# Protein panel (upregulated proteins with >50% importance, and at least 3 proteins per cancer)
+prot_panel_up <- 
+  prot_panel_top3 %>% 
+  bind_rows(prot_panel_50) %>% 
+  distinct()
+
+prot_panel_up %>% 
+  pull(Protein) %>% 
+  unique() %>% 
+  length()
+
+prot_panel_up %>% 
+  group_by(Cancer) %>% 
+  summarise(n = n_distinct(Protein)) %>% 
+  arrange(-n)
+
+saveRDS(prot_panel_up, savepath_data("Panel", "panel_proteins_up.rds"))
+
+```
+
+## Save Supplementary file 3
+
+```{r}
+
+protein_panel_excel <- 
+  prot_panel_up %>% 
+  mutate(Protein = gsub("`","",Protein))%>% 
+  select(GROUP = Cancer, Protein, `Protein Importance` = Overall) %>% 
+  left_join(levels$cancers_12_mapping, by = "GROUP") %>% 
+  left_join(de_up %>% 
+              select(GROUP = Class, Protein = Assay, OlinkID,  `NPX difference` = difference,	`p.adjusted` = p.adjusted, Significance = sig),
+            by = c("GROUP","Protein")) %>% 
+  ungroup() %>% 
+  select(Cancer, Protein, OlinkID, `Protein Importance`, `NPX difference`, `p.adjusted`, Significance) %>% 
+  mutate(Significance = str_to_sentence(Significance)) %>% 
+  mutate(Cancer = factor(Cancer, levels = levels$cancers_12_mapping$Cancer),
+         `Protein Importance` = round(`Protein Importance`,1),
+         `NPX difference` = round(`NPX difference`,1)) %>% 
+  arrange(Cancer,-`Protein Importance`)
+
+
+writexl::write_xlsx(protein_panel_excel, savepath_data("Supplementary_data", "DataS3_protein_panel.xlsx"))
+
+```
+
+
+## Heatmap summarizing expression profiles of panel proteins accross cancers
+
+```{r}
+
+prots_in_panel <- 
+  prot_panel_up %>% 
+  pull(Protein) %>% 
+  unique()
+
+ann_col <- 
+  data.frame(X = levels$cancers_12, Cancer = levels$cancers_12) %>% 
+  column_to_rownames("X")
+
+ann_row <- 
+  prot_panel_up %>% 
+  group_by(Protein) %>% 
+  top_n(1,Overall) %>% 
+  select(-Overall) %>% 
+  arrange(Cancer) %>% 
+  column_to_rownames("Protein")
+
+sample_order <- 
+  data %>% 
+  select(Sample) %>% 
+  distinct() %>% 
+  left_join(metadata %>% 
+              select(GROUP,Sample),
+            by = "Sample") %>% 
+  filter(GROUP %in% levels$cancers_12) %>% 
+  arrange(GROUP) 
+  
+gaps <- 
+  ann_row %>% 
+  rownames_to_column("Protein") %>% 
+  group_by(Cancer) %>% 
+  summarise(n = n_distinct(Protein)) %>% 
+  mutate(gap = cumsum(n)) %>% 
+  head(11) %>% 
+  pull(gap)
+
+data %>% 
+  left_join(metadata %>% 
+              select(GROUP,Sample),
+            by = "Sample") %>% 
+  filter(GROUP %in% levels$cancers_12,
+         Assay %in% prots_in_panel) %>% 
+  select(Sample,Assay,NPX) %>% 
+  spread(Assay,NPX) %>% 
+  column_to_rownames("Sample") %>% 
+  scale() %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>% 
+  gather(Assay,NPX,-Sample) %>% 
+  left_join(metadata %>% 
+              select(GROUP,Sample),
+            by = "Sample") %>% 
+  group_by(GROUP,Assay) %>% 
+  drop_na() %>% 
+  summarise(avg_NPX = mean(NPX)) %>% 
+  ungroup() %>% 
+  mutate(Assay = factor(Assay, levels = rownames(ann_row)),
+         GROUP = factor(GROUP, 
+                        c("CLL","CVX","PRC",
+                          "BRC","ENDC","OVC","CRC",
+                          "LUNGC","MYEL","GLIOM",
+                          "AML","LYMPH"))) %>% 
+  arrange(GROUP,Assay) %>% 
+  group_by(Assay) %>% 
+  mutate(avg_NPX = scales::rescale(avg_NPX, to = c(0,1))) %>% 
+  spread(GROUP,avg_NPX) %>% 
+  column_to_rownames("Assay") %>% 
+  t() %>% 
+  pheatmap(clustering_method = "ward.D2",
+           color = palettes$heatmap(100),
+           cluster_cols = F,
+           annotation_col = ann_row,
+           cellwidth = 6,
+           cellheight = 6,
+           gaps_col = gaps,
+           fontsize = 7,
+           annotation_colors = list("Cancer" = palettes$alt_group[levels$cancers_12])) %>% 
+  as.ggplot()
+
+ggsave(savepath("heatmap_scaled.pdf"),
+       height = 5,
+       width = 10)
+
+```
+
+## Network summarizing the selected proteins for each cancer
+
+```{r}
+
+set.seed(213)
+tbl_graph <- 
+  prot_panel_up %>%
+  select(Protein, Cancer, Overall) %>% 
+  as_tbl_graph() 
+
+tbl_graph %>% 
+  activate(nodes) %>% 
+  mutate(text_color = case_when(name %in% levels$cancers_12 ~ "white",
+                                T ~ "black")) %>%
+  create_layout(layout = "nicely") %>%
+  ggraph() + 
+  geom_edge_link(color = "grey80", width = 1) +
+  geom_node_point(data = . %>% 
+                    filter(name %in% levels$cancers_12) ,
+                  aes(color = name),
+                  size = 10,
+                  fill ="grey30",
+                  shape = 21,
+                  stroke = 3) +
+  geom_node_point(data = . %>% 
+                    filter(!name %in% levels$cancers_12) %>% 
+                    left_join(prot_panel_up %>% 
+                                select(name = Protein, Overall),
+                              by = "name"), 
+                  aes(fill = Overall),
+                  shape = 21,
+                  size = 5,
+                  color = "grey80",
+                  stroke = 0) +
+  scale_color_manual(values = palettes$alt_group[levels$cancers_12], 
+                     guide = "none") +
+  scale_fill_gradient(high = "grey30",low = "grey80") +
+  ggnewscale::new_scale_color() +
+  geom_node_text(aes(label = str_wrap(name, width = 10),
+                     color = text_color),
+                 lineheight = 0.8,
+                 size = 2,
+                 vjust = 0) +
+  scale_color_identity() +
+  theme_void() + 
+  coord_fixed() 
+
+ggsave(savepath("network_protein_panel.pdf"))
+
+```
+
+## UMAP of all samples based on the panel proteins
+
+```{r}
+
+# Prepare data and use removeBatchEffect from limma to correct for sex effect
+meta_data <-
+  metadata %>% 
+  filter(GROUP %in% levels$cancers_12,
+         Sample %in% unique(data$Sample)) %>% 
+  select(Sample,GROUP,Sex)
+
+in_dat <- 
+  data %>%
+  left_join(metadata, by = "Sample") %>% 
+  filter(GROUP %in% levels$cancers_12) %>% 
+  filter(Assay %in% unique(prot_panel_up$Protein)) %>% 
+  select(Sample,Assay,NPX) %>% 
+  impute_values(ID = "Sample")
+
+in_dat_matrix <-
+  in_dat %>% 
+  column_to_rownames("Sample")
+
+in_data_limma <- 
+  in_dat_matrix[meta_data$Sample,] %>% 
+  t() %>% 
+  removeBatchEffect(batch = meta_data$Sex,
+                    design = model.matrix(~ GROUP, 
+                                          data = meta_data),
+                    method = 'ls') 
+
+# Perform PCA + UMAP
+data_umap <- 
+  in_data_limma %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  do_umap(seed = 13, n_neighbors = 25, n_components = 2, pca = 30, spread = 1)%>% 
+  rownames_to_column("Sample") %>% 
+  left_join(metadata) %>% 
+  left_join(levels$cancers_12_mapping) 
+
+data_umap %>% 
+  ggplot(aes(UMAP1, UMAP2, color = GROUP)) +
+  geom_point(size = 1, alpha = 0.6) + 
+  scale_color_manual(values = palettes$alt_group) +
+  scale_fill_manual(values = palettes$alt_group) +
+  theme_void() +
+  coord_fixed()
+
+ggsave(savepath("umap_25n_30pc_unscaled.pdf"),
+       height = 7,
+       width = 7)
+
+# Faceted UMAP (highlight one cancer at a time)
+tibble(Facet = levels$cancers_12) %>% 
+  group_by_all() %>% 
+  do({
+    data_umap
+  }) %>% 
+  mutate(color = case_when(Facet == GROUP ~ GROUP,
+                           T ~ "Other")) %>% 
+  ggplot(aes(UMAP1, UMAP2, color = color)) +
+  geom_point(size = 0.2, alpha = 0.6, show.legend = F) +
+  scale_color_manual(values = c(palettes$alt_group, "Other" = "grey")) +
+  scale_fill_manual(values = c(palettes$alt_group, "Other" = "grey")) +
+  facet_wrap(~Facet, nrow = 3)+
+  themes$simple+
+  coord_fixed()
+
+ggsave(savepath("UMAP_facet.pdf"),
+       height = 5,
+       width = 10)
+
+
+```
+
+
+## Protein boxplots 
+
+```{r}
+
+# Generate boxplot of the top panel protein for each cancer
+prots <- 
+  prot_panel_up %>% 
+  group_by(Cancer) %>% 
+  top_n(1,Overall) %>% 
+  select(Protein,Cancer)
+
+data %>% 
+  select(Sample, Assay, NPX) %>% 
+  left_join(metadata %>% 
+              select(Sample,GROUP),
+            by = "Sample") %>% 
+  left_join(levels$cancers_12_mapping %>% 
+              rename(Cancer_fac = Cancer),
+            by = "GROUP") %>% 
+  filter(GROUP %in% levels$cancers_12) %>% 
+  filter(Assay %in% prots$Protein) %>%
+  left_join(prots, by = c("Assay" = "Protein")) %>% 
+  mutate(Assay = factor(Assay, levels = prots$Protein),
+         GROUP = factor(GROUP, levels = levels$cancers_12_mapping$GROUP),
+         Cancer_fac = factor(Cancer_fac, levels = levels$cancers_12_mapping$Cancer),
+         color = case_when(GROUP == Cancer ~ Cancer,
+                           T ~ "Other")) %>% 
+  ggplot(aes(Cancer_fac, NPX, color = color, fill = color)) +
+  geom_quasirandom(size = 0.5, alpha = 0.5, show.legend=F) +
+  geom_boxplot(alpha = 0.2, color = "black", outlier.color = NA, show.legend = F) +
+  facet_wrap(~Assay, scales = "free_y", nrow = 4) +
+  scale_color_manual(values = c(palettes$alt_group, "Other" = "grey")) +
+  scale_fill_manual(values = c(palettes$alt_group, "Other" = "grey")) +
+  themes$simple +
+  theme(axis.text = element_text(size = 8)) 
+
+ggsave(savepath("top_panel_protein_per_cancer.pdf"),
+       height = 8,
+       width = 8)
+
+# Generate boxplot for all panel proteins
+prot_panel_up %>% 
+  group_by(Cancer) %>% 
+  summarise(n = n_distinct(Protein)) %>% 
+  arrange(-n)
+
+prot_panel_up_ex <- 
+  prot_panel_up %>% 
+  mutate(Cancer = factor(Cancer, levels = levels$cancers_12)) %>% 
+  mutate(comb = paste(Protein, " (", Cancer, ")", sep = "")) %>% 
+  arrange(Cancer,-Overall)
+
+panel_boxplots <- 
+  lapply(prot_panel_up_ex$comb, function(protein) {
+    
+    current <- 
+      prot_panel_up_ex %>% 
+      filter(comb == protein)
+    
+    data %>% 
+      select(Sample, Assay, NPX) %>% 
+      left_join(metadata %>% 
+                  select(Sample,GROUP), 
+                by = "Sample") %>% 
+      filter(GROUP %in% levels$cancers_12) %>% 
+      filter(Assay %in% current$Protein) %>%
+      mutate(GROUP = factor(GROUP, levels = levels$cancers_12),
+             color = case_when(GROUP == current$Cancer ~ as.character(current$Cancer),
+                               T ~ "Other")) %>% 
+      ggplot(aes(GROUP, NPX, color = color, fill = color)) +
+      geom_quasirandom(size = 0.5, alpha = 0.5, show.legend=F) +
+      geom_boxplot(alpha = 0.2, color = "black", outlier.color = NA, show.legend = F) +
+      scale_color_manual(values = c(palettes$alt_group, "Other" = "grey")) +
+      scale_fill_manual(values = c(palettes$alt_group, "Other" = "grey")) +
+      themes$simple +
+      theme(axis.text = element_text(size = 8)) +
+      ggtitle(current$comb)
+    
+    
+  })
+
+pdf(savepath("all_panel_boxplots.pdf"))
+panel_boxplots
+dev.off()
+
+```
+
+
+
+# Multiclassification 
+
+## All proteins
+
+```{r}
+
+# Multiclassification including all measured proteins (n = 1,463)
+multipred_12_all <-
+  multiclassification(data = data, 
+                      split_data = cancers_split,
+                      metadata = metadata,
+                      method = "glmnet", 
+                      groups = levels$cancers_12, 
+                      palette = palettes$alt_group[levels$cancers_12],
+                      tune_param = 10, 
+                      CV = 5)
+
+saveRDS(multipred_12_all, savepath_data("Models", "multipred_all_proteins.rds"))
+
+```
+
+
+## Panel
+
+```{r}
+
+# Multiclassification including all proteins included in the panel
+multipred_12_panel <-
+  multiclassification(data = data, 
+                      split_data = cancers_split,
+                      metadata = metadata,
+                      select_proteins = unique(prot_panel_up$Protein),
+                      method = "glmnet", 
+                      groups = levels$cancers_12, 
+                      palette = palettes$alt_group[levels$cancers_12],
+                      tune_param = 10, 
+                      CV = 5)
+
+saveRDS(multipred_12_panel, savepath_data("Models", "multipred_panel_proteins.rds"))
+
+```
+
+
+## Top 3
+
+```{r}
+
+# Multiclassification including the top3 proteins in the panel for each cancer (n = 36)
+top_3 <- 
+  prot_panel_up %>% 
+  group_by(Cancer) %>% 
+  top_n(3, Overall)
+
+multipred_top3_panel <-
+  multiclassification(data = data, 
+                      split_data = cancers_split,
+                      metadata = metadata,
+                      select_proteins = unique(top_3$Protein),
+                      method = "glmnet", 
+                      groups = levels$cancers_12, 
+                      palette = palettes$alt_group[levels$cancers_12],
+                      tune_param = 10, 
+                      CV = 5)
+
+saveRDS(multipred_top3_panel, savepath_data("models", "multipred_top3_cancer_proteins.rds"))
+
+```
+
+## Top 1
+
+```{r}
+
+# Multiclassification including the top3 proteins in the panel for each cancer (n = 12)
+top_1 <- 
+  prot_panel_up %>% 
+  group_by(Cancer) %>% 
+  top_n(1, Overall)
+
+multipred_top1_panel <-
+  multiclassification(data = data, 
+                      split_data = cancers_split,
+                      metadata = metadata,
+                      select_proteins = unique(top_1$Protein),
+                      method = "glmnet", 
+                      groups = levels$cancers_12, 
+                      palette = palettes$alt_group[levels$cancers_12],
+                      tune_param = 10, 
+                      CV = 5)
+
+saveRDS(multipred_top1_panel, savepath_data("Models", "multipred_top1_cancer_proteins.rds"))
+
+```
+
+
+## ROC comparison
+
+```{r}
+
+# Extract the ROC results from all multiclassifications
+all_roc <- 
+  multipred_top1_panel$roc_df %>% 
+  select(-Method) %>% 
+  mutate(Method = "top 1",
+         Performance = paste(Group, " - ", Method, ": ", round(AUC,2),sep="")) %>% 
+  bind_rows( multipred_top3_panel$roc_df %>% 
+               select(-Method) %>% 
+               mutate(Method = "top 3",
+                      Performance = paste(Group, " - ", Method, ": ", round(AUC,2),sep=""))) %>% 
+bind_rows(multipred_12_panel$roc_df %>% 
+            select(-Method) %>% 
+            mutate(Method = "protein panel",
+                   Performance = paste(Group, " - ", Method, ": ", round(AUC,2),sep=""))) %>% 
+  bind_rows(multipred_12_all$roc_df %>% 
+              select(-Method) %>% 
+              mutate(Method = "all proteins",
+                     Performance = paste(Group, " - ", Method, ": ", round(AUC,2),sep="")))
+
+aucs <- 
+  all_roc %>% 
+  rename(GROUP = Group) %>% 
+  left_join(levels$cancers_12_mapping, by = "GROUP") %>% 
+  select(Cancer, AUC, Method) %>% 
+  mutate(AUC = round(AUC,2)) %>% 
+  distinct() %>% 
+  mutate(x = 0.75,
+         y = case_when(Method == "all proteins" ~ 0.35,
+                       Method == "protein panel" ~ 0.25,
+                       Method == "top 3" ~ 0.15,
+                       T ~ 0.05))
+
+# Visualize all ROC 
+all_roc %>%
+  rename(GROUP = Group) %>% 
+  left_join(levels$cancers_12_mapping, by = "GROUP") %>% 
+  mutate(Cancer = factor(Cancer, levels = levels$cancers_12_mapping$Cancer),
+         Method = factor(Method,levels = c("all proteins", "protein panel", "top 3", "top 1"))) %>%
+  arrange(Cancer,Method) %>% 
+  ggplot(aes(x = 1-Specificity, y=Sensitivity, group = Method)) +
+  geom_path(aes(color = Method), size=1) +
+  geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1), 
+               colour='grey', linetype = 'dotdash') +
+  geom_text(data = aucs, aes(x,y,color=Method, label = paste("AUC: ", round(AUC,3),sep = "")), size = 3, show.legend = F) +
+  themes$main + 
+  scale_color_manual(values = palettes$auc) +
+  facet_wrap(~as.factor(Cancer)) +
+  theme(axis.text = element_text(size = 8),
+        legend.position = "top")
+
+ggsave(savepath("multipred_aucs_top.pdf"),
+       height = 7,
+       width = 8)
+
+```
+
+
+# Classification Cancer-Wellness
+
+## Data split
+
+```{r}
+
+# Prepare Wellness data
+wellness_data_complete <- 
+  wellness_data %>%  
+  left_join(wellness_meta, by = "Sample") %>% 
+  mutate(Study = "Wellness")
+
+wellness_dat <- 
+  wellness_data_complete %>% 
+  select(Sample, GROUP) %>% 
+  distinct()
+
+# Split Wellness data into train and test set
+set.seed(213)
+train <- createDataPartition(wellness_dat$GROUP,p=0.7,list=FALSE)
+train_data <- 
+  wellness_dat[train,] %>% 
+  mutate(set = "train")
+test_data <- wellness_dat[-train,] %>% 
+  mutate(set = "test")
+
+wellness_split <- 
+  train_data %>% 
+  bind_rows(test_data)
+
+final_split <- 
+  cancers_split %>% 
+  bind_rows(wellness_split)
+
+# Combined Cancer & Wellness metadata
+all_meta_w <- 
+  metadata %>% 
+  filter(GROUP %in% levels$cancers_12,
+         Sample %in% data$Sample) %>% 
+  select(Sample,GROUP) %>% 
+  mutate(Study = "UCAN") %>% 
+  bind_rows(wellness_dat %>% 
+              mutate(Study = "Wellness"))
+
+```
+
+
+## Limma correction
+
+```{r}
+
+# Batch correction using limma
+ucan_wellness <- 
+  data %>% 
+  mutate(Study = "UCAN") %>% 
+  left_join(metadata %>% 
+              select(Sample, GROUP, Sex),
+            by = "Sample") %>% 
+  filter(GROUP %in% levels$cancers_12) %>% 
+  bind_rows(wellness_data_complete)
+
+to_limma_u_w <- 
+  ucan_wellness %>% 
+  left_join(all_meta_w, by = c("Sample","GROUP","Study")) %>% 
+  filter(Study %in% c("UCAN","Wellness")) %>% 
+  select(-Study) %>% 
+  mutate(Sample = factor(Sample, levels = all_meta_w$Sample)) %>% 
+  arrange(Sample) %>% 
+  select(Sample,Assay, NPX) %>% 
+  spread(Sample,NPX) %>% 
+  column_to_rownames("Assay") %>% 
+  as.matrix()
+
+batch <- 
+  all_meta_w %>% 
+  filter(Sample %in% colnames(to_limma_u_w)) %>%
+  mutate(batch =  Study) %>% 
+  pull(batch)
+
+corrected_limma_u_w <- 
+  removeBatchEffect(to_limma_u_w, batch)
+
+all_data_limma_u_w <- 
+  corrected_limma_u_w %>%
+  t() %>% 
+  as_tibble(rownames = "Sample") %>% 
+  gather(Assay,NPX, -Sample) %>% 
+  left_join(all_meta_w) %>% 
+  filter(!is.na(NPX))%>% 
+  mutate(correction = "limma")
+
+
+saveRDS(all_meta_w, savepath_data("Wellness_comparison", "all_meta_w.rds"))
+saveRDS(final_split, savepath_data("Wellness_comparison", "final_split.rds"))
+saveRDS(wellness_data_complete, savepath_data("Wellness_comparison", "wellness_data_complete.rds"))
+saveRDS(all_data_limma_u_w, savepath_data("Wellness_comparison", "all_data_limma_u_w.rds"))
+
+```
+
+
+## Wellness - Cancer classification (glmnet)
+
+```{r}
+
+wellness_limma <- 
+  lapply(levels$cancers_12, function(cancer) {
+    
+    
+    if(cancer %in% c("BRC","ENDC","CVX","OVC")) {
+      all_data_split <- 
+        cancers_split %>% 
+        filter(GROUP  == cancer) %>% 
+        bind_rows(wellness_split %>% 
+                    left_join(wellness_meta %>% 
+                                select(Sample,Sex),
+                              by = "Sample") %>% 
+                    filter(Sex == "f") %>% 
+                    select(-Sex))
+      
+    } else if (cancer == "PRC") {
+      all_data_split <- 
+        cancers_split %>% 
+        filter(GROUP  == cancer) %>% 
+        bind_rows(wellness_split %>% 
+                    left_join(wellness_meta %>% 
+                                select(Sample,Sex),
+                              by = "Sample") %>% 
+                    group_by(set,Sex) %>% 
+                    filter(Sex == "m") %>% 
+                    select(-Sex))
+    } else {
+      all_data_split <- 
+        cancers_split %>% 
+        filter(GROUP  == cancer) %>% 
+        bind_rows(wellness_split)
+      
+    }
+    
+    cancer_proteins <- 
+      prot_panel_up %>% 
+      filter(Cancer == cancer) %>% 
+      pull(Protein)
+    
+    limma_dat <- 
+      all_data_limma_u_w %>% select(Sample,Assay,NPX)
+    
+    if(length(cancer_proteins) > 1) {
+      disease_classifier(cancer_type = cancer,
+                         method = "glmnet", 
+                         data = limma_dat,
+                         split_data = all_data_split,
+                         metadata = all_meta_w, 
+                         select_proteins = cancer_proteins, 
+                         tune_param = 10, 
+                         CV = 5)
+    } else {
+      tibble()
+    }
+
+  }) %>% 
+  set_names(levels$cancers_12)
+
+saveRDS(wellness_limma, savepath_data("Models", "wellness_limma_models.rds"))
+
+```
+
+
+### Summarize classification results
+
+```{r}
+
+# Generate a plot with the prediction probabilities and ROC results for all the Cancer-Wellness prediction models
+wellness_cancer_plots <- 
+  lapply(levels$cancers_12, function(cancer) {
+    
+    cancer_name <- 
+      levels$cancers_12_mapping %>% 
+      filter(GROUP == cancer) %>% 
+      pull(Cancer)
+    
+    if(is_tibble(wellness_limma[[cancer]])) {
+      
+      ggplot() + theme_void() # The cancer had 1 or 0 proteins in the panel
+      
+    } else {
+      all_prob <- 
+        data.frame(response = wellness_limma[[cancer]]$roc_res$response, 
+                   predicted = wellness_limma[[cancer]]$roc_res$predictor) %>% 
+        mutate(True_class = case_when(response == "0_Control" ~ "Wellness",
+                                      T ~ cancer_name)) %>% 
+        rename(Cancer_probability = predicted) %>% 
+        ggplot(aes(True_class,Cancer_probability, fill = True_class, color = True_class)) +
+        geom_quasirandom(alpha = 0.7,show.legend = F) +
+        geom_violin( color = "grey20", alpha = 0.3, show.legend = F, scale = "width")+ 
+        stat_summary(fun = "mean",
+                     geom = "crossbar", 
+                     width = 0.5,
+                     color = "grey20",
+                     show.legend = F)+
+        scale_color_manual(values = c(palettes$alt_group[[cancer]],"grey"))+
+        scale_fill_manual(values = c(palettes$alt_group[[cancer]],"grey"))+
+        themes$main 
+      
+      df<-
+        data.frame(y=unlist(wellness_limma[[cancer]]$roc_res[2]), x=unlist(wellness_limma[[cancer]]$roc_res[3])) %>% 
+        mutate(GROUP = cancer)
+      
+      all_roc <- 
+        df %>% 
+        mutate(x = 1-x) %>% 
+        arrange(y) %>% 
+        ggplot(aes(x, y)) + 
+        geom_line(size = 1, color = palettes$alt_group[[cancer]]) + 
+        geom_abline(intercept=0, slope=1, linetype="dashed") +
+        xlab("1-Specificity") +  #False Positive rate
+        ylab("Sensitivity") + #True Positive rate
+        themes$main +
+        annotate("text", x = .75, y = .25, label = paste("AUC",wellness_limma[[cancer]]$roc_res[[9]] %>% round(3)))
+      
+      (all_prob/ all_roc ) +
+        plot_annotation(title = paste(cancer, " - all samples", sep =""))
+    }
+    
+  })
+
+(wellness_cancer_plots[[1]] | wellness_cancer_plots[[2]] | wellness_cancer_plots[[3]] | wellness_cancer_plots[[4]])  /
+  (wellness_cancer_plots[[5]] | wellness_cancer_plots[[6]] | wellness_cancer_plots[[7]] | wellness_cancer_plots[[8]]) /
+  (wellness_cancer_plots[[9]] | wellness_cancer_plots[[10]] | wellness_cancer_plots[[11]] | wellness_cancer_plots[[12]])
+
+ggsave(savepath("wellness_classification_results.pdf"),
+       height = 13,
+       width = 10)
+
+```
+
+
+## Wellness - Cancer Stage 1 classification (glmnet)
+
+```{r}
+
+# Apply the prediction model Cancer-Wellness to stage 1 patients only (for colorectal and lung cancer)
+
+crc_lung_stage1 <- 
+  lapply(c("CRC","LUNGC"), function(cancer) {
+    
+   # cancer <- "CRC"
+    all_data_split <- 
+        cancers_split %>% 
+        filter(GROUP  == cancer) %>% 
+        bind_rows(wellness_split)
+        
+    cancer_proteins <- 
+      prot_panel_up %>% 
+      filter(Cancer == cancer) %>% 
+      pull(Protein)
+    
+    disease_classifier_stage1(cancer_type = cancer,
+                       method = "glmnet", 
+                       data = all_data_limma_u_w %>% select(Sample,Assay,NPX), #all_data,
+                       split_data = all_data_split,
+                       metadata = all_meta_w,
+                       metadata_stage = metadata, 
+                       select_proteins = cancer_proteins, 
+                       tune_param = 10, 
+                       CV = 5)
+  }) %>% 
+  set_names(c("CRC","LUNGC"))
+
+saveRDS(crc_lung_stage1, savepath_data("Models", "glmnet_res_wellness_crc_lung_stage1.rds"))
+
+```
+
+### Summaryize classification results
+
+```{r}
+
+# Summarize results for colorectal cancer
+crc_all_prob <- 
+  data.frame(response = crc_lung_stage1$CRC$roc_res$response, predicted = crc_lung_stage1$CRC$roc_res$predictor) %>% 
+  mutate(True_class = case_when(response == "0_Control" ~ "Wellness",
+                                T ~ "CRC")) %>% 
+  rename(Cancer_probability = predicted) %>% 
+  ggplot(aes(True_class,Cancer_probability, fill = True_class, color = True_class)) +
+  geom_quasirandom(alpha = 0.7,show.legend = F) +
+  geom_violin( color = "grey20", alpha = 0.3, show.legend = F, scale = "width")+ 
+  stat_summary(fun = "mean",
+               geom = "crossbar", 
+               width = 0.5,
+               color = "grey20",
+               show.legend = F)+
+  scale_color_manual(values = c(palettes$alt_group["CRC"],"Wellness"="grey"))+
+  scale_fill_manual(values = c(palettes$alt_group["CRC"],"Wellness"="grey"))+
+  themes$main 
+
+df<-
+  data.frame(y=unlist(crc_lung_stage1$CRC$roc_res[2]), x=unlist(crc_lung_stage1$CRC$roc_res[3])) %>% 
+  mutate(GROUP = "CRC")
+
+crc_all_roc <- 
+  df %>% 
+  mutate(x = 1-x) %>% 
+  arrange(y) %>% 
+  ggplot(aes(x, y)) + 
+  geom_line(size = 1, color = palettes$alt_group[["CRC"]]) + 
+  geom_abline(intercept=0, slope=1, linetype="dashed") +
+  xlab("False Positive rate") + 
+  ylab("True Positive rate") +
+  themes$main +
+  annotate("text", x = .75, y = .25, label = paste("AUC",crc_lung_stage1$CRC$roc_res[[9]] %>% round(3)))
+
+crc_all_samples <- 
+  (crc_all_roc | crc_all_prob) +
+  plot_annotation(title = "CRC - all samples")
+
+crc_s1_prob <- 
+  data.frame(response = crc_lung_stage1$CRC$roc_res_s1$response, predicted = crc_lung_stage1$CRC$roc_res_s1$predictor) %>% 
+  mutate(True_class = case_when(response == "0_Control" ~ "Wellness",
+                                T ~ "CRC Stage 1")) %>% 
+  rename(Cancer_probability = predicted) %>% 
+  ggplot(aes(True_class,Cancer_probability, fill = True_class, color = True_class)) +
+  geom_quasirandom(alpha = 0.7,show.legend = F) +
+  geom_violin( color = "grey20", alpha = 0.3, show.legend = F, scale = "width")+ 
+  stat_summary(fun = "mean",
+               geom = "crossbar", 
+               width = 0.5,
+               color = "grey20",
+               show.legend = F)+
+  scale_color_manual(values = c("CRC Stage 1" = palettes$stage[["1"]],"Wellness"="grey")) +
+  scale_fill_manual(values = c("CRC Stage 1" = palettes$stage[["1"]],"Wellness"="grey")) +
+  themes$main 
+
+df_s1_crc <-
+  data.frame(y=unlist(crc_lung_stage1$CRC$roc_res_s1[2]), x=unlist(crc_lung_stage1$CRC$roc_res_s1[3])) %>% 
+  mutate(GROUP = "CRC")
+
+crc_s1_roc <- 
+  df_s1_crc %>% 
+  mutate(x = 1-x) %>% 
+  arrange(y) %>% 
+  ggplot(aes(x, y)) + 
+  geom_line(size = 1, color = palettes$stage[["1"]]) + 
+  geom_abline(intercept=0, slope=1, linetype="dashed") +
+  xlab("1-Specificity") + 
+  ylab("Sensitivity") +
+  themes$main +
+  annotate("text", x = .75, y = .25, label = paste("AUC",crc_lung_stage1$CRC$roc_res_s1[[9]] %>% round(3)))
+
+crc_s1_samples <- 
+  (crc_s1_roc | crc_s1_prob) +
+  plot_annotation(title = "CRC - stage 1 samples")
+
+crc_all_samples /
+  crc_s1_samples
+
+ggsave(savepath("CRC_all_stages.pdf"))
+
+# Sumamrize results for lung cancer
+lungc_all_prob <- 
+  data.frame(response = crc_lung_stage1$LUNGC$roc_res$response, predicted = crc_lung_stage1$LUNGC$roc_res$predictor) %>% 
+  mutate(True_class = case_when(response == "0_Control" ~ "Wellness",
+                                T ~ "LUNGC")) %>% 
+  rename(Cancer_probability = predicted) %>% 
+  ggplot(aes(True_class,Cancer_probability, fill = True_class, color = True_class)) +
+  geom_quasirandom(alpha = 0.7,show.legend = F) +
+  geom_violin( color = "grey20", alpha = 0.3, show.legend = F, scale = "width")+ 
+  stat_summary(fun = "mean",
+               geom = "crossbar", 
+               width = 0.5,
+               color = "grey20",
+               show.legend = F)+
+  scale_color_manual(values = c(palettes$alt_group["LUNGC"],"Wellness"="grey"))+
+  scale_fill_manual(values = c(palettes$alt_group["LUNGC"],"Wellness"="grey"))+
+  themes$main 
+
+df_lung<-
+  data.frame(y=unlist(crc_lung_stage1$LUNGC$roc_res[2]), x=unlist(crc_lung_stage1$LUNGC$roc_res[3])) %>% 
+  mutate(GROUP = "LUNGC")
+
+lungc_all_roc <- 
+  df_lung %>% 
+  mutate(x = 1-x) %>% 
+  arrange(y) %>% 
+  ggplot(aes(x, y)) + 
+  geom_line(size = 1, color = palettes$alt_group[["LUNGC"]]) + 
+  geom_abline(intercept=0, slope=1, linetype="dashed") +
+  xlab("1-Specificity") +  
+  ylab("Sensitivity") +
+  themes$main +
+  annotate("text", x = .75, y = .25, label = paste("AUC",crc_lung_stage1$LUNGC$roc_res[[9]] %>% round(3)))
+
+lungc_all_samples <- 
+  (lungc_all_roc | lungc_all_prob) +
+  plot_annotation(title = "LUNGC - all samples")
+
+lungc_s1_prob <- 
+  data.frame(response = crc_lung_stage1$LUNGC$roc_res_s1$response, predicted = crc_lung_stage1$LUNGC$roc_res_s1$predictor) %>% 
+  mutate(True_class = case_when(response == "0_Control" ~ "Wellness",
+                                T ~ "LUNGC Stage 1")) %>% 
+  rename(Cancer_probability = predicted) %>% 
+  ggplot(aes(True_class,Cancer_probability, fill = True_class, color = True_class)) +
+  geom_quasirandom(alpha = 0.7,show.legend = F) +
+  geom_violin( color = "grey20", alpha = 0.3, show.legend = F, scale = "width")+ 
+  stat_summary(fun = "mean",
+               geom = "crossbar", 
+               width = 0.5,
+               color = "grey20",
+               show.legend = F)+
+  scale_color_manual(values = c("LUNGC Stage 1" = palettes$stage[["1"]],"Wellness"="grey")) +
+  scale_fill_manual(values = c("LUNGC Stage 1" = palettes$stage[["1"]],"Wellness"="grey")) +
+  themes$main 
+
+df_s1_lungc <-
+  data.frame(y=unlist(crc_lung_stage1$LUNGC$roc_res_s1[2]), x=unlist(crc_lung_stage1$LUNGC$roc_res_s1[3])) %>% 
+  mutate(GROUP = "LUNGC")
+
+lungc_s1_roc <- 
+  df_s1_lungc %>% 
+  mutate(x = 1-x) %>% 
+  arrange(y) %>% 
+  ggplot(aes(x, y)) + 
+  geom_line(size = 1, color = palettes$stage[["1"]]) + 
+  geom_abline(intercept=0, slope=1, linetype="dashed") +
+  xlab("1-Specificity") +  #False Positive rate
+  ylab("Sensitivity") + #True Positive rate
+  #theme_bw() +
+  themes$main +
+  #theme(panel.grid.major = element_blank(), 
+  #       panel.grid.minor = element_blank(),
+  #      axis.title = element_text(size = 8)) +
+  annotate("text", x = .75, y = .25, label = paste("AUC",crc_lung_stage1$LUNGC$roc_res_s1[[9]] %>% round(3)))
+
+lungc_s1_samples <- 
+  (lungc_s1_roc | lungc_s1_prob) +
+  plot_annotation(title = "LUNGC - stage 1 samples")
+
+lungc_all_samples /
+  lungc_s1_samples
+
+ggsave(savepath("LUNGC_all_stages.pdf"))
+
+```
+
+### De-long test
+
+```{r}
+
+delong_stage1 <- 
+  data.frame(cancer = c("CRC","LUNGC")) %>% 
+  group_by(cancer) %>% 
+  do({
+    
+    c <- .$cancer
+    
+    res <- 
+      pROC::roc.test(crc_lung_stage1[[c]]$roc_res,
+                     crc_lung_stage1[[c]]$roc_res_s1, 
+                     method = "delong", 
+                     paired = FALSE,
+                     boot.n=10000)
+    
+    data.frame(AUC_all = as.numeric(res$roc1$auc),
+               AUC_stage1 = as.numeric(res$roc2$auc),
+               pvalue = res$p.value,
+               #CI = res$conf.int,
+               method = res$method)
+  })
+
+write_csv(delong_stage1, savepath_data("delong_test", "delong_all_stage1.csv"))
+
+# Visualize
+all_roc <- 
+  lapply(c("CRC","LUNGC"), function(cancer_type) {
+    
+    roc <- crc_lung_stage1[[cancer_type]]$roc_res 
+    
+     df<-data.frame(Sensitivity=unlist(roc[2]), 
+                    Specificity=unlist(roc[3])) %>% 
+    mutate(Group = cancer_type,
+           Method = "all",
+           AUC = as.numeric(unlist(roc[9])))
+     
+  }) %>% 
+  bind_rows() %>% 
+  bind_rows(lapply(c("CRC","LUNGC"), function(cancer_type) {
+    
+    roc <- crc_lung_stage1[[cancer_type]]$roc_res_s1 
+    
+    df<-data.frame(Sensitivity=unlist(roc[2]), 
+                    Specificity=unlist(roc[3])) %>% 
+    mutate(Group = cancer_type,
+           Method = "stage1",
+           AUC = as.numeric(unlist(roc[9])))
+     
+  }) %>% 
+  bind_rows()) %>% 
+  mutate(Performance = paste(Group, " - ", Method, ": ", round(AUC,2),sep=""))
+
+aucs <- 
+  all_roc %>% 
+  select(Group, AUC, Method) %>% 
+  mutate(AUC = round(AUC,2)) %>% 
+  distinct() %>% 
+  mutate(x = 0.95,
+         y = case_when(Method == "all" ~ 0.35,
+                       Method == "stage1" ~ 0.25,
+                       T ~ 0.05))
+
+all_roc %>% 
+  arrange(Group,Method) %>% 
+  ggplot(aes(x = 1-Specificity, y=Sensitivity, group = Method)) +
+  geom_path(aes(color = Method), size=1) +
+  geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1), 
+               colour='grey', linetype = 'dotdash') +
+  geom_text(data = aucs, aes(x,y,color=Method, label = paste("AUC: ", round(AUC,3), sep ="")),
+            hjust = 1,
+            size = 3, show.legend = F) +
+  geom_text(data = delong_stage1 %>% rename(Group = cancer), 
+            aes(x = 0.95, y = 0.1, label = paste("p-value: ", round(pvalue,2), sep = "")),
+            hjust = 1,
+            color = "black", size = 3, inherit.aes = F) +
+  themes$main + 
+  scale_color_manual(values = c("all" = "grey", "stage1" = palettes$stage[["1"]])) +
+  facet_wrap(~as.factor(Group)) +
+  theme(axis.text = element_text(size = 8),
+        axis.text.x = element_text(angle = 45))
+
+ggsave(savepath("aucs_all_stage1_delong.pdf"),
+       height = 3,
+       width = 6)
+
+```
+
+
+
+# Session info 
+
+```{r}
+
+writeLines(capture.output(sessionInfo()), savepath_data("Sessions", "sessionInfo_prediction.txt"))
+
+```
+

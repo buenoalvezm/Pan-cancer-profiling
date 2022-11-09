@@ -1,0 +1,324 @@
+---
+title: "Differential expression"
+author: "María Bueno Álvez"
+date: "08/11/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+Analysis date: `r Sys.Date()`
+
+# Set up
+
+## Load libraries
+
+```{r}
+
+library(tidyverse)
+library(gridExtra)
+library(grid)
+library(patchwork)
+library(ggrepel)
+library(ggbeeswarm)
+library(UpSetR)
+library(ggplotify)
+library(clusterProfiler)
+
+select <- dplyr::select
+rename <- dplyr::rename
+summarise <- dplyr::summarise
+
+source("scripts/functions_utility.R")
+
+```
+
+## Read data
+
+```{r}
+
+# Cancer data (synthetic)
+data <- 
+  readRDS("data/cancer_data_synthetic.rds")
+metadata <- 
+  readRDS("data/cancer_metadata_synthetic.rds")
+
+# Healthy data (synthetic)
+wellness_data <- 
+  readRDS("data/wellness_data_synthetic.rds")
+wellness_meta <- 
+  readRDS("data/wellness_metadata_synthetic.rds")
+
+# Data for enrichment analysis
+gene_info <- 
+  read_tsv("data/enrichment_analysis/geneinfo_103.tsv")
+GO_db <- 
+  read_tsv("data/enrichment_analysis/Ensembl103 GO terms.txt")
+
+# Themes & palettes
+palettes <- 
+  readRDS("data/processed/others/palettes.rds")
+themes <- 
+  readRDS("data/processed/others/plot_themes.rds")
+levels <- 
+  readRDS("data/processed/others/levels.rds")
+  
+```
+
+
+
+# DE cancer-cancer (sex controlled)
+
+```{r}
+
+de_data <- data
+OlinkIDs<-unique(de_data$OlinkID)
+volcano_result<-matrix(nrow=0, ncol=5)
+colnames(volcano_result)<-c("OlinkID", "Assay","p.value", "difference","Class")
+cancers <- levels$cancers_12
+
+# Loop over proteins & each cancer and run t.test to assess differences in mean (specific cancer VS all other cancers)
+for(i in 1:length(OlinkIDs)) {
+  
+  Olink_id <- OlinkIDs[i]
+  
+  de_data_filtered <-
+    de_data %>%
+    filter(OlinkID %in% Olink_id) %>%
+    left_join(metadata, by='Sample') %>%
+    filter(GROUP %in% levels$cancers_12) 
+  
+  de_data_filtered$GROUP <- as.factor(de_data_filtered$GROUP)
+  protein<-unique(de_data_filtered$Assay)
+  
+  for(j in 1:length(cancers)) {
+    
+    cancer<-cancers[j]
+
+    if(cancer %in% c("BRC","CVX","ENDC","OVC")) {
+      dat <- 
+        de_data_filtered %>% 
+        filter(Sex == "Female")
+    } else if (cancer == "PRC") {
+      dat <- 
+        de_data_filtered %>% 
+        filter(Sex == "Male")
+    } else {
+      dat <- de_data_filtered
+    }
+    
+    group1<-
+      dat %>%
+      filter(GROUP == cancer) %>%
+      pull(NPX)
+    
+    group2<-
+      dat %>%
+      filter(GROUP != cancer) %>%
+      pull(NPX)
+    
+    test_res <- t.test(group1 ,group2)
+    p.val<- test_res$p.value
+    difference <- mean(group1)-mean(group2)
+    
+    volcano_result<-rbind(volcano_result, c(Olink_id, protein,p.val, difference, cancer))
+  }
+  
+}
+
+volcano_result <- 
+  as.data.frame(volcano_result)%>%
+  mutate(p.value = as.numeric(p.value)) %>%
+  mutate(difference = as.numeric(difference))
+
+saveRDS(volcano_result, savepath_data("DE","cancers_sex_controlled_not_adjusted.rds")) 
+
+```
+
+# Volcano plots
+
+```{r}
+
+# Generate volcano plots summarizing the differential expression results (the cancer_volcano function performs multiple hypothesis testing correction)
+volcanos <- 
+  lapply(cancers, function(cancer) {
+    cancer_volcano(cancer = cancer,
+                  volcano.result = volcano_result,
+                  title = "")
+  })
+
+pdf(savepath("volcano_plots.pdf"))
+volcanos
+dev.off()
+
+```
+
+# Common up/down-regulated proteins
+
+```{r}
+
+# Multiple hypothesis testing correction
+volcano_adj <- 
+  volcano_result %>% 
+  group_by(Class) %>% 
+  do({
+    dat <- .
+    
+    dat %>%
+      DE_adjust()
+  })
+
+# Find number of cancers where each protein is upregulated
+volcano_adj %>% 
+  filter(sig == "significant up") %>% 
+  group_by(Assay) %>% 
+  summarise(n_cancers= n_distinct(Class)) %>% 
+  arrange(-n_cancers)
+
+# UpSet plot for the sets of upregulated proteins in each cancer
+in_list_up <- 
+  lapply(levels$cancers_12, function(cancer) {
+  volcano_adj %>% 
+  filter(sig == "significant up",
+         Class == cancer) %>% 
+    pull(Assay)
+}) %>% 
+  set_names(levels$cancers_12)
+
+upset_pal <- 
+  volcano_adj %>% 
+  filter(sig == "significant up") %>% 
+  group_by(Class) %>% 
+  summarise(n = n_distinct(Assay)) %>% 
+  arrange(-n) %>% 
+  left_join(enframe(palettes$alt_group[levels$cancers_12], "Class", "Color")) %>% 
+  select(-n) %>% 
+  deframe()
+
+pdf(savepath("upset_up.pdf"))
+upset(fromList(in_list_up), order.by = "freq", nsets = 12, sets.bar.color = upset_pal)
+dev.off()
+
+# UpSet plot for the sets of downregulated proteins in each cancer
+in_list_down <- 
+  lapply(levels$cancers_12, function(cancer) {
+  volcano_adj %>% 
+  filter(sig == "significant down",
+         Class == cancer) %>% 
+    pull(Assay)
+}) %>% 
+  set_names(levels$cancers_12)
+
+upset_pal <- 
+  volcano_adj %>% 
+  filter(sig == "significant down") %>% 
+  group_by(Class) %>% 
+  summarise(n = n_distinct(Assay)) %>% 
+  arrange(-n) %>% 
+  left_join(enframe(palettes$alt_group[levels$cancers_12], "Class", "Color")) %>% 
+  select(-n) %>% 
+  deframe()
+
+pdf(savepath("upset_down.pdf"))
+upset(fromList(in_list_down), order.by = "freq", nsets = 12, sets.bar.color = upset_pal)
+dev.off()
+
+```
+
+
+# Enrichmentn analysis 
+
+```{r}
+
+# Data & settings for ORA analysis
+minGSSize <- 10
+maxGSSize <- Inf
+pvalueCutoff <- 1
+qvalueCutoff <- 1
+
+universe <-
+  data %>% 
+  left_join(gene_info, by = c("Assay" = "gene_name")) %>% 
+  pull(ensg_id) %>% 
+  unique()
+
+universe_entrez <-
+  data %>% 
+  left_join(gene_info, by = c("Assay" = "gene_name")) %>% 
+  pull(gene_id) %>% 
+  unique()
+
+database <- 
+  GO_db %>% 
+  filter(`GO domain` == "biological_process") %>% 
+  filter(`Gene stable ID` %in% universe) %>% 
+  select(term = `GO term name`, gene = `Gene stable ID`) %>% 
+  distinct()
+
+all_partitions <- 
+  volcano_adj %>%
+  filter(sig == "significant up") %>% 
+  left_join(gene_info %>% 
+              select(Assay = gene_name , ensg_id))  %>% 
+  rename(gene = ensg_id)
+
+# Run enrichment analysis using the enricher function
+res <- 
+  all_partitions %>%
+  group_by(Class) %>% 
+  do({
+    dat <<- .
+    pull(dat, gene) %>%
+      enricher(universe = universe,
+               TERM2GENE = database, 
+               minGSSize = minGSSize,
+               maxGSSize = maxGSSize,
+               pvalueCutoff = pvalueCutoff,
+               qvalueCutoff = qvalueCutoff) %>%
+      as_tibble()
+  })
+
+sig_res_wide <- 
+  res %>% 
+  filter(p.adjust < 0.05) %>% 
+  select(Class,ID, p.adjust) %>% 
+  mutate(`log10(p-adjust)` = -log10(p.adjust)) %>% 
+  select(-p.adjust) %>%
+  spread(Class,`log10(p-adjust)`, fill = 0) %>% 
+  column_to_rownames("ID")
+
+order <- 
+  sig_res_wide %>% 
+  dist(method = "euclidean") %>% 
+  hclust(method = "ward.D2") %>% 
+  with(labels[order])
+
+# Generate bubble heatmap summarizing the significant results
+res %>% 
+  filter(p.adjust < 0.05,
+         Count > 10) %>% 
+  mutate(Term = factor(ID, levels = order),
+         Cancer = factor(Class, levels = levels$cancers_12)) %>% 
+  ggplot(aes(Term,Cancer, size = Count, color = -log10(p.adjust))) + 
+  coord_flip() +
+  geom_point() +
+  scale_color_gradient(low="grey", high = "red") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 8), 
+        axis.text.x = element_text(size = 8,
+                                   angle = 90,
+                                   vjust = 0.5,
+                                   hjust = 1))
+
+ggsave(savepath("enrichemnt_upregualted.pdf"))
+
+```
+
+# Session info
+
+```{r}
+
+writeLines(capture.output(sessionInfo()), savepath_data("Sessions", "sessionInfo_DE.txt"))
+
+```
+
