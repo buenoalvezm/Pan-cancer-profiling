@@ -191,7 +191,8 @@ upset_pal <-
   group_by(Class) %>% 
   summarise(n = n_distinct(Assay)) %>% 
   arrange(-n) %>% 
-  left_join(enframe(palettes$alt_group[levels$cancers_12], "Class", "Color")) %>% 
+  left_join(enframe(palettes$alt_group[levels$cancers_12], "Class", "Color"),
+            by = "Class") %>% 
   select(-n) %>% 
   deframe()
 
@@ -215,7 +216,8 @@ upset_pal <-
   group_by(Class) %>% 
   summarise(n = n_distinct(Assay)) %>% 
   arrange(-n) %>% 
-  left_join(enframe(palettes$alt_group[levels$cancers_12], "Class", "Color")) %>% 
+  left_join(enframe(palettes$alt_group[levels$cancers_12], "Class", "Color"),
+            by = "Class") %>% 
   select(-n) %>% 
   deframe()
 
@@ -259,7 +261,8 @@ all_partitions <-
   volcano_adj %>%
   filter(sig == "significant up") %>% 
   left_join(gene_info %>% 
-              select(Assay = gene_name , ensg_id))  %>% 
+              select(Assay = gene_name , ensg_id),
+            by = "Assay")  %>% 
   rename(gene = ensg_id)
 
 # Run enrichment analysis using the enricher function

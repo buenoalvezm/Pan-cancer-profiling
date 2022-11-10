@@ -433,7 +433,8 @@ prot_import <-
 
 # Scatterplot - model importance
 prot_import %>% 
-  left_join(levels$cancers_12_mapping) %>% 
+  left_join(levels$cancers_12_mapping,
+            by = "GROUP") %>% 
   mutate(Cancer = factor(Cancer, levels = levels$cancers_12_mapping$Cancer)) %>%
   spread(Model, Overall, -1, -3) %>% 
   mutate(avg = (glmnet + rf) / 2) %>% 
@@ -486,7 +487,8 @@ sample_prob <-
 sample_prob %>% 
   ungroup() %>% 
   mutate(GROUP = factor(GROUP, levels = levels$cancers_12)) %>% 
-  left_join(levels$cancers_12_mapping) %>% 
+  left_join(levels$cancers_12_mapping,
+            by = "GROUP") %>% 
   mutate(Cancer = factor(Cancer, levels = levels$cancers_12_mapping$Cancer)) %>%
   select(-Probability_control) %>% 
   spread(Model, Probability_cancer, -1,-2,-4) %>% 
@@ -806,8 +808,8 @@ data_umap <-
   as.data.frame() %>% 
   do_umap(seed = 13, n_neighbors = 25, n_components = 2, pca = 30, spread = 1)%>% 
   rownames_to_column("Sample") %>% 
-  left_join(metadata) %>% 
-  left_join(levels$cancers_12_mapping) 
+  left_join(metadata, by = "Sample") %>% 
+  left_join(levels$cancers_12_mapping, by = "GROUP") 
 
 data_umap %>% 
   ggplot(aes(UMAP1, UMAP2, color = GROUP)) +
@@ -1176,7 +1178,7 @@ all_data_limma_u_w <-
   t() %>% 
   as_tibble(rownames = "Sample") %>% 
   gather(Assay,NPX, -Sample) %>% 
-  left_join(all_meta_w) %>% 
+  left_join(all_meta_w, by = "Sample") %>% 
   filter(!is.na(NPX))%>% 
   mutate(correction = "limma")
 
