@@ -2,6 +2,7 @@
 # Create directory to save results
 savepath <- 
   function(savename) { 
+    dir.create("results/", showWarnings = FALSE)
     result_folder <- paste0("results/", Sys.Date())
     dir.create(result_folder, showWarnings = FALSE)
     
