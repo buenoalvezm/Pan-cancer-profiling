@@ -79,7 +79,7 @@ do_umap <-
     set.seed(seed)
     
     umap_res <- 
-      umap(wide_data, 
+      uwot::umap(wide_data, 
            n_neighbors = n_neighbors,
            n_components = n_components,
            ...) %>% 
