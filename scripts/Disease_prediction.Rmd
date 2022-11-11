@@ -1363,7 +1363,7 @@ saveRDS(crc_lung_stage1, savepath_data("Models", "glmnet_res_wellness_crc_lung_s
 
 ```
 
-### Summaryize classification results
+### Summarize classification results
 
 ```{r}
 
