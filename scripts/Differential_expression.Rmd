@@ -67,7 +67,7 @@ levels <-
 
 
 
-# DE cancer-cancer (sex controlled)
+# DE cancer-cancer 
 
 ```{r}
 
@@ -95,11 +95,11 @@ for(i in 1:length(OlinkIDs)) {
     
     cancer<-cancers[j]
 
-    if(cancer %in% c("BRC","CVX","ENDC","OVC")) {
+    if(cancer %in% c("BRC","CVX","ENDC","OVC")) { # Compare only to female samples (female cancers)
       dat <- 
         de_data_filtered %>% 
         filter(Sex == "Female")
-    } else if (cancer == "PRC") {
+    } else if (cancer == "PRC") { # Compare only to male samples (male cancers)
       dat <- 
         de_data_filtered %>% 
         filter(Sex == "Male")
