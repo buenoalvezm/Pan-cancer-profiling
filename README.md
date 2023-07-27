@@ -9,8 +9,8 @@ This code was generated in the context of the study “****Next generation pan-c
 
 In this study, the plasma profiles of 1,463 proteins were measured for 1,477 cancer patients representing 12 common cancer types, including the most prevalent types such as colorectal-, breast-, lung- and prostate cancer. The plasma proteome was measured in minute amounts of blood plasma collected at the time of diagnosis and before treatment using the antibody-based PEA technology combined with next generation sequencing (developed by Olink). The plasma profiles of patients with a specific cancer type were compared to the patients with other cancer diagnosis in order to find cancer-specific signatures that can distinguish each type of cancer from other cancer types. Both differential expression and disease prediction models were used as tools for the identification of specific cancer signatures. 
 
-The results from the study are available as a pre-print:
-Mathias Uhlen, María Bueno Álvez, Fredrik Edfors et al. Next generation pan-cancer blood proteome profiling using proximity extension assay, 01 November 2022, PREPRINT (Version 1) available at Research Square [[https://doi.org/10.21203/rs.3.rs-2025767/v1](https://doi.org/10.21203/rs.3.rs-2025767/v1)].
+The results from the study are published in Nature Communications:
+Bueno Álvez, M., Edfors, F., von Feilitzen, K. et al. Next generation pan-cancer blood proteome profiling using proximity extension assay. Nat Commun 14, 4308 (2023). https://doi.org/10.1038/s41467-023-39765-y
 
 ### Content
 
@@ -57,6 +57,8 @@ All resulting data files (e.g. differential expression analysis, results from pr
 
 ## Citation
 
-To use this code in your own research, please cite our pre-print: 
+To use this code in your own research, please cite our code and/or our study: 
 
-Mathias Uhlen, María Bueno Álvez, Fredrik Edfors et al. Next generation pan-cancer blood proteome profiling using proximity extension assay, 01 November 2022, PREPRINT (Version 1) available at Research Square [[https://doi.org/10.21203/rs.3.rs-2025767/v1](https://doi.org/10.21203/rs.3.rs-2025767/v1)].
+Bueno Álvez, M. buenoalvezm/Pan-cancer-profiling: pan-cancer-profiling (Version v2). Zenodo. https://doi.org/10.5281/zenodo.8012430 (2023).
+
+Bueno Álvez, M., Edfors, F., von Feilitzen, K. et al. Next generation pan-cancer blood proteome profiling using proximity extension assay. Nat Commun 14, 4308 (2023). https://doi.org/10.1038/s41467-023-39765-y
